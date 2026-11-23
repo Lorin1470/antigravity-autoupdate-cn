@@ -1,0 +1,17 @@
+# Dependencies (auto-cloned by the script)
+deps/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Temporary logs & files
+*.log
+/tmp/
