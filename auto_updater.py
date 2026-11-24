@@ -117,31 +117,74 @@ class AntigravityAutoUpdater:
             log_warning(f"讀取本機 Info.plist 失敗: {e}")
             return None
 
-    def get_remote_manifest(self):
-        manifest_url = f"{self.manifest_base}/latest-{self.arch}-mac.yml"
-        log_info(f"正在檢查官方更新資訊 ({manifest_url})...")
-        req = urllib.request.Request(
-            manifest_url,
-            headers={'User-Agent': 'AntigravityAutoUpdater/1.0'}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                content = resp.read().decode('utf-8')
-        except Exception as e:
-            raise RuntimeError(f"無法連線至官方更新伺服器: {e}")
+    def get_remote_manifest(self, retries=3, delay=3):
+        candidates = []
+        arch_tag = 'arm' if self.arch == 'arm64' else 'x64'
 
-        version_m = re.search(r'^version:\s*(.+)$', content, re.MULTILINE)
-        url_m = re.search(r'url:\s*(https?://[^\s]+)', content)
-        sha_m = re.search(r'sha512:\s*([^\s]+)', content)
+        for attempt in range(1, retries + 1):
+            candidates.clear()
+            # 來源 1: 官方官網發布頁面 (最新首發版本)
+            try:
+                log_info(f"正在檢查官方官網發布版本 (https://antigravity.google/download)...")
+                req_web = urllib.request.Request(
+                    "https://antigravity.google/download",
+                    headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+                )
+                with urllib.request.urlopen(req_web, timeout=12) as resp:
+                    html = resp.read().decode('utf-8')
+                pattern = rf'https://storage\.googleapis\.com/antigravity-public/antigravity-hub/([0-9\.]+-[0-9]+)/darwin-{arch_tag}/Antigravity\.(dmg|zip)'
+                m = re.search(pattern, html)
+                if m:
+                    build_id = m.group(1)
+                    ver = build_id.split('-')[0]
+                    zip_url = f'https://storage.googleapis.com/antigravity-public/antigravity-hub/{build_id}/darwin-{arch_tag}/Antigravity.zip'
+                    candidates.append({
+                        'version': ver,
+                        'url': zip_url,
+                        'sha512': None,
+                        'source': '官方官網'
+                    })
+            except Exception as e:
+                log_warning(f"檢查官方官網發布頁面失敗 (嘗試 {attempt}/{retries}): {e}")
 
-        if not version_m or not url_m:
-            raise RuntimeError("官方清單 (manifest) 解析失敗，找不到版本號或下載位址。")
+            # 來源 2: 官方自動更新清單 (分批推播通道)
+            manifest_url = f"{self.manifest_base}/latest-{self.arch}-mac.yml"
+            try:
+                log_info(f"正在檢查官方推送清單 ({manifest_url})...")
+                req = urllib.request.Request(
+                    manifest_url,
+                    headers={'User-Agent': 'AntigravityAutoUpdater/1.0'}
+                )
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    content = resp.read().decode('utf-8')
+                version_m = re.search(r'^version:\s*(.+)$', content, re.MULTILINE)
+                url_m = re.search(r'url:\s*(https?://[^\s]+)', content)
+                sha_m = re.search(r'sha512:\s*([^\s]+)', content)
+                if version_m and url_m:
+                    candidates.append({
+                        'version': version_m.group(1).strip(),
+                        'url': url_m.group(1).strip(),
+                        'sha512': sha_m.group(1).strip() if sha_m else None,
+                        'source': '推送通道'
+                    })
+            except Exception as e:
+                log_warning(f"檢查官方推送清單失敗 (嘗試 {attempt}/{retries}): {e}")
 
-        return {
-            'version': version_m.group(1).strip(),
-            'url': url_m.group(1).strip(),
-            'sha512': sha_m.group(1).strip() if sha_m else None
-        }
+            if candidates:
+                break
+
+            if attempt < retries:
+                log_info(f"網路暫時不可用，正在等待 {delay} 秒後重試...")
+                time.sleep(delay)
+
+        if not candidates:
+            raise RuntimeError("無法連線至任何官方更新來源，請檢查網路連線或稍後重試。")
+
+        # 排序選取版本號最高的來源
+        candidates.sort(key=lambda c: self.parse_semver(c['version']), reverse=True)
+        best = candidates[0]
+        log_success(f"取得最新版本: v{best['version']} (來源: {best['source']})")
+        return best
 
     def parse_semver(self, ver_str):
         if not ver_str:
@@ -389,10 +432,16 @@ class AntigravityAutoUpdater:
         # 1. 檢查更新
         if not background:
             log_step(1, 4 if patch_only else 6, "檢查官方最新版本")
-        manifest = self.get_remote_manifest()
+        try:
+            manifest = self.get_remote_manifest()
+        except Exception as e:
+            if background:
+                log_warning(f"後台檢查網路不可用，略過本次排程: {e}")
+                return 0
+            raise
         remote_ver = manifest['version']
         if not background:
-            log_info(f"官方最新版本: {remote_ver}")
+            log_info(f"官方最新版本: {remote_ver} (來自 {manifest.get('source', '官方管道')})")
 
         has_update = False
         if not local_ver:
