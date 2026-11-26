@@ -236,42 +236,78 @@ class AntigravityAutoUpdater:
 
     def download_file(self, url, dest_path, expected_sha512=None):
         log_info(f"開始下載安裝包: {url}")
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        hasher = hashlib.sha512()
+        curl_bin = shutil.which("curl")
 
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            total_size = int(resp.headers.get('Content-Length', 0))
-            downloaded = 0
-            block_size = 65536
-            start_time = time.time()
+        if curl_bin:
+            cmd = [
+                curl_bin,
+                "-fL",
+                "-C", "-",
+                "--retry", "5",
+                "--retry-delay", "3",
+                "--connect-timeout", "20",
+                "--speed-limit", "10240",
+                "--speed-time", "30",
+                "-#",
+                "-o", str(dest_path),
+                url
+            ]
+            for attempt in range(1, 4):
+                res = subprocess.run(cmd)
+                if res.returncode == 0:
+                    break
+                if res.returncode == 33 and os.path.exists(dest_path):
+                    os.remove(dest_path)
+                if attempt < 3:
+                    log_warning(f"下載中斷 (代碼 {res.returncode})，3 秒後自動斷點續傳 (第 {attempt}/3 輪)...")
+                    time.sleep(3)
+                else:
+                    raise RuntimeError(f"下載失敗，請檢查網路連線 (curl exit code: {res.returncode})")
+        else:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                total_size = int(resp.headers.get('Content-Length', 0))
+                downloaded = 0
+                block_size = 65536
+                start_time = time.time()
 
-            with open(dest_path, 'wb') as f:
-                while True:
-                    chunk = resp.read(block_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    hasher.update(chunk)
-                    downloaded += len(chunk)
+                with open(dest_path, 'wb') as f:
+                    while True:
+                        chunk = resp.read(block_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
 
-                    if total_size > 0:
-                        percent = downloaded * 100 / total_size
-                        elapsed = time.time() - start_time
-                        speed = (downloaded / (1024 * 1024)) / (elapsed if elapsed > 0 else 1)
-                        sys.stdout.write(
-                            f"\r{Colors.CYAN}[下載進度]{Colors.RESET} {percent:5.1f}% "
-                            f"({downloaded/(1024*1024):.1f}/{total_size/(1024*1024):.1f} MB) "
-                            f"@ {speed:.1f} MB/s"
-                        )
-                        sys.stdout.flush()
-            print()
+                        if total_size > 0:
+                            percent = downloaded * 100 / total_size
+                            elapsed = time.time() - start_time
+                            speed = (downloaded / (1024 * 1024)) / (elapsed if elapsed > 0 else 1)
+                            sys.stdout.write(
+                                f"\r{Colors.CYAN}[下載進度]{Colors.RESET} {percent:5.1f}% "
+                                f"({downloaded/(1024*1024):.1f}/{total_size/(1024*1024):.1f} MB) "
+                                f"@ {speed:.1f} MB/s"
+                            )
+                            sys.stdout.flush()
+                print()
 
         log_success("檔案下載完成！")
 
         if expected_sha512:
             log_info("正在校驗 SHA-512 完整性雜湊值...")
+            hasher = hashlib.sha512()
+            with open(dest_path, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
             actual_b64 = base64.b64encode(hasher.digest()).decode('ascii')
             if actual_b64 != expected_sha512:
+                try:
+                    os.remove(dest_path)
+                except Exception:
+                    pass
                 raise ValueError(
                     f"雜湊校驗失敗！預期: {expected_sha512}, 實際: {actual_b64}"
                 )
@@ -506,17 +542,19 @@ class AntigravityAutoUpdater:
             print(f"\n{Colors.YELLOW}提示: 目前軟體已是最新版。若需要重新套用漢化或儀表板，請加 --force 或 --patch-only 參數。{Colors.RESET}")
             return 0
 
-        # 2. 關閉目前運行的 App
-        log_step(2, 4 if patch_only else 6, "安全關閉 Antigravity 避免檔案鎖定")
-        self.quit_app()
-
-        # 3. 下載與安裝官方新版本
+        # 2. 下載官方最新安裝包 (在關閉應用前下載，支援斷點續傳)
         if not patch_only:
-            log_step(3, 6, "下載官方最新安裝包")
+            log_step(2, 6, "下載官方最新安裝包")
             temp_zip = Path(tempfile.gettempdir()) / f"Antigravity-{remote_ver}-{self.arch}.zip"
+            self.download_file(manifest['url'], temp_zip, manifest.get('sha512'))
+
+            # 3. 安全關閉目前運行的 App
+            log_step(3, 6, "安全關閉 Antigravity 避免檔案鎖定")
+            self.quit_app()
+
+            # 4. 替換與部署全新官方版本
+            log_step(4, 6, "替換與部署全新官方版本")
             try:
-                self.download_file(manifest['url'], temp_zip, manifest.get('sha512'))
-                log_step(4, 6, "替換與部署全新官方版本")
                 self.install_official_app(temp_zip)
             finally:
                 if temp_zip.exists():
@@ -524,12 +562,15 @@ class AntigravityAutoUpdater:
                         temp_zip.unlink()
                     except Exception:
                         pass
+        else:
+            log_step(2, 4, "安全關閉 Antigravity 避免檔案鎖定")
+            self.quit_app()
 
-        # 4. 套用漢化
-        log_step(4 if not patch_only else 2, 4 if patch_only else 6, "同步並注入中文漢化套件")
+        # 5. 套用漢化
+        log_step(5 if not patch_only else 3, 4 if patch_only else 6, "同步並注入中文漢化套件")
         self.apply_localization(lang=target_lang, brand_title=target_brand)
 
-        # 5. 套用儀表板
+        # 6. 套用儀表板
         if self.config.get('enable_dashboard', True):
             log_step(5 if not patch_only else 3, 4 if patch_only else 6, "同步並配置 Antigrative Dashboard 插件")
             self.apply_dashboard()
