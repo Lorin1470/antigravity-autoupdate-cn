@@ -45,8 +45,17 @@ cat << EOF > "$TARGET_PLIST"
         <string>/bin/bash</string>
         <string>$APP_SUPPORT_DIR/runner.sh</string>
     </array>
-    <key>StartInterval</key>
-    <integer>14400</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardErrorPath</key>
@@ -63,8 +72,8 @@ launchctl load "$TARGET_PLIST"
 echo "======================================================"
 echo " [成功] 後台自啟動智慧更新服務已成功啟用！"
 echo " 1. 開機/登入時將自動檢查更新 (RunAtLoad: true)"
-echo " 2. 每 4 小時在後台自動檢查官方最新版本"
-echo " 3. 若軟體未開啟，將無感自動下載升級並完成繁中漢化"
-echo " 4. 若軟體正在使用中，將跳出 macOS 系統通知提醒"
+echo " 2. 每 30 分鐘及休眠喚醒後自動檢查官方最新版本"
+echo " 3. 發現新版後將於後台自動預先下載安裝檔"
+echo " 4. 若軟體未開啟將無感升級；若正在使用將彈出「立即重啟更新」視窗"
 echo " 如需停用服務，請執行: bash launchd/uninstall_service.sh"
 echo "======================================================"

@@ -39,20 +39,23 @@ class Colors:
     UNDERLINE = '\033[4m'
     RESET = '\033[0m'
 
+def _ts():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
 def log_info(msg):
-    print(f"{Colors.BLUE}[資訊]{Colors.RESET} {msg}")
+    print(f"[{_ts()}] {Colors.BLUE}[資訊]{Colors.RESET} {msg}", flush=True)
 
 def log_success(msg):
-    print(f"{Colors.GREEN}[成功]{Colors.RESET} {msg}")
+    print(f"[{_ts()}] {Colors.GREEN}[成功]{Colors.RESET} {msg}", flush=True)
 
 def log_warning(msg):
-    print(f"{Colors.YELLOW}[警告]{Colors.RESET} {msg}")
+    print(f"[{_ts()}] {Colors.YELLOW}[警告]{Colors.RESET} {msg}", flush=True)
 
 def log_error(msg):
-    print(f"{Colors.RED}[錯誤]{Colors.RESET} {msg}")
+    print(f"[{_ts()}] {Colors.RED}[錯誤]{Colors.RESET} {msg}", flush=True)
 
 def log_step(step_num, total_steps, title):
-    print(f"\n{Colors.BOLD}{Colors.CYAN}=== 步驟 [{step_num}/{total_steps}]: {title} ==={Colors.RESET}")
+    print(f"\n[{_ts()}] {Colors.BOLD}{Colors.CYAN}=== 步驟 [{step_num}/{total_steps}]: {title} ==={Colors.RESET}", flush=True)
 
 def notify_macos(title, message):
     try:
@@ -200,12 +203,16 @@ class AntigravityAutoUpdater:
 
     def is_app_running(self):
         try:
+            exe_marker = f"{self.app_path}/Contents/MacOS/Antigravity"
             res = subprocess.run(
-                ["pgrep", "-f", "Antigravity.app/Contents/MacOS/Antigravity"],
+                ["/bin/ps", "-ww", "-axo", "command="],
                 capture_output=True,
                 text=True
             )
-            return res.returncode == 0
+            for line in res.stdout.splitlines():
+                if exe_marker in line and "Helper" not in line and "--type=" not in line:
+                    return True
+            return False
         except Exception:
             return False
 
@@ -510,18 +517,68 @@ class AntigravityAutoUpdater:
         if background:
             if not has_update:
                 return 0
+
+            temp_zip = Path(tempfile.gettempdir()) / f"Antigravity-{remote_ver}-{self.arch}.zip"
+            log_info(f"後台偵測到新版本 v{remote_ver}，正在背景預先下載安裝檔...")
+            self.download_file(manifest['url'], temp_zip, manifest.get('sha512'))
+
             if self.is_app_running():
-                log_info(f"後台偵測到新版本 v{remote_ver}，但目前 Antigravity 正在使用中，發送更新提示...")
-                notify_macos(
-                    "Antigravity 發現新版本",
-                    f"官方發布了新版本 (v{remote_ver})！請在關閉軟體後點擊「一鍵更新並漢化」進行升級。"
+                prompt_state_file = Path(tempfile.gettempdir()) / "antigravity_prompt_state.json"
+                should_prompt = True
+                try:
+                    if prompt_state_file.exists():
+                        st = json.loads(prompt_state_file.read_text(encoding='utf-8'))
+                        if st.get('version') == remote_ver and (time.time() - st.get('timestamp', 0)) < 14400:
+                            should_prompt = False
+                except Exception:
+                    pass
+
+                if not should_prompt:
+                    log_info(f"新版本 v{remote_ver} 已在背景就緒，4 小時內已提示過使用者，等待軟體關閉後自動套用。")
+                    return 0
+
+                try:
+                    prompt_state_file.write_text(json.dumps({
+                        'version': remote_ver,
+                        'timestamp': time.time()
+                    }), encoding='utf-8')
+                except Exception:
+                    pass
+
+                log_info(f"新版本 v{remote_ver} 已預先下載完畢，彈出視窗詢問使用者是否立即重啟更新...")
+                dlg_script = (
+                    f'button returned of (display dialog '
+                    f'"Google Antigravity 已在背景為您下載好最新版本 v{remote_ver}！\\n\\n'
+                    f'是否立即重啟以套用官方更新與繁體中文化？（約需 5 秒）" '
+                    f'buttons {{"稍後再說", "立即重啟更新"}} '
+                    f'default button "立即重啟更新" '
+                    f'with title "Antigravity 自動更新就緒")'
                 )
+                res = subprocess.run(["osascript", "-e", dlg_script], capture_output=True, text=True)
+                if res.returncode == 0 and "立即重啟更新" in res.stdout:
+                    log_info("使用者選擇立即重啟更新，開始安全關閉並套用安裝...")
+                    self.quit_app()
+                    try:
+                        self.install_official_app(temp_zip)
+                    finally:
+                        if temp_zip.exists():
+                            try: temp_zip.unlink()
+                            except Exception: pass
+                    self.apply_localization(lang=target_lang, brand_title=target_brand)
+                    if self.config.get('enable_dashboard', True):
+                        self.apply_dashboard()
+                    if self.config.get('auto_launch', True):
+                        self.launch_app()
+                    notify_macos(
+                        "Antigravity 自動更新成功",
+                        f"已升級至 v{remote_ver} 並完成繁中漢化與儀表板配置！"
+                    )
+                else:
+                    log_info("使用者選擇稍後更新，安裝檔已暫存就緒。")
                 return 0
             else:
                 log_info(f"後台偵測到新版本 v{remote_ver} 且應用未運行，開始執行無感自動更新...")
-                temp_zip = Path(tempfile.gettempdir()) / f"Antigravity-{remote_ver}-{self.arch}.zip"
                 try:
-                    self.download_file(manifest['url'], temp_zip, manifest.get('sha512'))
                     self.install_official_app(temp_zip)
                 finally:
                     if temp_zip.exists():
